@@ -1,0 +1,89 @@
+name: Build Kernel Samsung S20 FE Series
+
+on:
+  workflow_dispatch: # Manually trigger the workflow
+  schedule: # Schedule the workflow to run approximately every 15 days
+    - cron: '0 0 */15 * *' # Run at midnight every 15 days
+  push: # Trigger the workflow on code pushes to the specified branch
+    branches:
+      - HEAD
+  pull_request: # Trigger the workflow on pull requests to the specified branch
+    branches:
+      - HEAD
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      CCACHE_COMPILERCHECK: "%compiler% -dumpmachine; %compiler% -dumpversion"
+      CCACHE_NOHASHDIR: "true"
+      CCACHE_MAXSIZE: "2G"
+      CCACHE_HARDLINK: "true"
+      KERNEL_DEFCONFIG: "r8q_defconfig"
+      KERNEL_MODEL_NAME: "r8q"
+      KERNEL_CMDLINE: "ARCH=arm64 CC=clang CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi- O=out"
+      REPO_NAME: "android_kernel_samsung_sm8250"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: 'true'
+          fetch-depth: 100
+        # This step checks out your repository with submodules and sets the fetch depth.
+
+      - name: Set up ccache
+        uses: hendrikmuhs/ccache-action@v1.2
+        # This step sets up ccache, a caching mechanism for compiler output.
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update -y 
+          sudo apt install gcc-aarch64-linux-gnu -y
+          sudo apt install gcc-arm-linux-gnueabi -y
+          sudo apt install binutils make python3 ccache libssl-dev build-essential bc bison flex unzip libssl-dev ca-certificates xz-utils mkbootimg cpio device-tree-compiler git git-lfs jq -y
+          # Install necessary dependencies, including compilers and tools.
+
+          # Download and extract Clang
+          curl -Ls $(curl -s https://api.github.com/repos/ZyCromerZ/Clang/releases/latest | grep "browser_download_url" | cut -d '"' -f 4) -o clang.tar.gz
+          mkdir clang
+          tar -xzvf clang.tar.gz -C clang
+          # Download and extract Clang compiler for building.
+
+      - name: Get Time
+        id: get_time
+        run: echo "TIME=$(TZ=UTC-8 date +%m%d%H%M )" >> $GITHUB_ENV
+        # This step sets an environment variable with the current time in a specific format.
+
+      - name: Build Kernel-With-KernelSU
+        run: |
+          set -x
+          rm -rf KernelSU
+          rm -rf drivers/kernelsu
+          curl -LSs "https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh" | bash -
+          # Download and set up KernelSU again.
+          latest_version_of_Kernel_SU=$(curl -s https://api.github.com/repos/tiann/KernelSU/releases/latest | jq -r '.tag_name')
+          # Get the latest version of KernelSU.
+          CONFIG_LOCALVERSION="-An-Unknown-M51-KSU-$latest_version_of_Kernel_SU-${{ steps.get_time.outputs.TIME }}"
+          # Define a new local version for the kernel.
+          export PATH=$(pwd)/clang/bin/:$PATH
+          # Add clang to the PATH.
+          make $KERNEL_CMDLINE $KERNEL_DEFCONFIG CC="ccache clang"
+          make $KERNEL_CMDLINE CC="ccache clang" -j$(nproc --all) LOCALVERSION="$CONFIG_LOCALVERSION"
+          # Build the kernel again.
+          IMAGE="$(pwd)/out/arch/arm64/boot/Image.gz"
+          # Define the path to the kernel image.
+          if [[ -f "$IMAGE" ]]; then
+            cd AnyKernel3  # Change directory to AnyKernel3
+            cp "$IMAGE" Image.gz-dtb
+            zip -r9 "Kernel$CONFIG_LOCALVERSION.zip" .  # Create a new zip
+            echo "Created Kernel$CONFIG_LOCALVERSION.zip"
+          fi
+          # Check if the kernel image exists, and if it does, create a zip with the specified name.
+
+      - name: Upload Kernel-SU
+        uses: actions/upload-artifact@v3
+        with:
+          name: An-Unknown_kernel_op6-KSU-${{ steps.get_time.outputs.TIME }}
+          path: "AnyKernel3/*.zip"
+        # This step uploads the kernel build artifacts as an artifact for later use.
