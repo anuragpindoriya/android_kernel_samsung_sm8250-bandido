@@ -74,6 +74,11 @@ int smp_call_function_single_async(int cpu, struct __call_single_data *csd);
 extern void smp_send_stop(void);
 
 /*
+ * sends an IPI event to the specified CPUs:
+ */
+extern void smp_send_ipi(const struct cpumask *cpus);
+
+/*
  * sends a 'reschedule' event to another CPU:
  */
 extern void smp_send_reschedule(int cpu);
@@ -108,6 +113,7 @@ int smp_call_function_any(const struct cpumask *mask,
 
 void kick_all_cpus_sync(void);
 void wake_up_all_idle_cpus(void);
+void wake_up_all_online_idle_cpus(void);
 
 /*
  * Generic and arch helpers
@@ -164,6 +170,7 @@ smp_call_function_any(const struct cpumask *mask, smp_call_func_t func,
 
 static inline void kick_all_cpus_sync(void) {  }
 static inline void wake_up_all_idle_cpus(void) {  }
+static inline void wake_up_all_online_idle_cpus(void) {  }
 
 #ifdef CONFIG_UP_LATE_INIT
 extern void __init up_late_init(void);

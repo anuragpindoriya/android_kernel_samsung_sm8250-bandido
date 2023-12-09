@@ -356,7 +356,7 @@ void cpuidle_uninstall_idle_handler(void)
 {
 	if (enabled_devices) {
 		initialized = 0;
-		wake_up_all_idle_cpus();
+		wake_up_all_online_idle_cpus();
 	}
 
 	/*
@@ -687,10 +687,8 @@ static int cpuidle_latency_notify(struct notifier_block *b,
 {
 	unsigned long cpus = atomic_read(&idled) & *cpumask_bits(to_cpumask(v));
 
-	/* Use READ_ONCE to get the isolated mask outside cpu_add_remove_lock */
-	cpus &= ~READ_ONCE(*cpumask_bits(cpu_isolated_mask));
 	if (cpus)
-		arch_send_wakeup_ipi_mask(to_cpumask(&cpus));
+		smp_send_ipi(to_cpumask(&cpus));
 
 	return NOTIFY_OK;
 }

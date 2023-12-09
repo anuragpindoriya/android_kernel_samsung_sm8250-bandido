@@ -59,8 +59,8 @@ struct lpm_cluster *lpm_root_node;
 
 #define MAXSAMPLES 5
 
-static bool lpm_prediction = true;
-module_param_named(lpm_prediction, lpm_prediction, bool, 0664);
+#define lpm_prediction_enabled	true
+#define lpm_ipi_prediction_enabled	false
 
 static bool lpm_ipi_prediction = true;
 module_param_named(lpm_ipi_prediction, lpm_ipi_prediction, bool, 0664);
@@ -318,7 +318,7 @@ static void histtimer_start(uint32_t time_us)
 	struct hrtimer *cpu_histtimer = &per_cpu(histtimer, cpu);
 
 	cpu_histtimer->function = histtimer_fn;
-	hrtimer_start(cpu_histtimer, hist_ktime, HRTIMER_MODE_REL_PINNED);
+	hrtimer_start(cpu_histtimer, hist_ktime, HRTIMER_MODE_REL_PINNED_HARD);
 }
 
 static void cluster_timer_init(struct lpm_cluster *cluster)
@@ -328,7 +328,8 @@ static void cluster_timer_init(struct lpm_cluster *cluster)
 	if (!cluster)
 		return;
 
-	hrtimer_init(&cluster->histtimer, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
+	hrtimer_init(&cluster->histtimer, CLOCK_MONOTONIC,
+		     HRTIMER_MODE_REL_HARD);
 
 	list_for_each(list, &cluster->child) {
 		struct lpm_cluster *n;
@@ -375,7 +376,7 @@ static void clusttimer_start(struct lpm_cluster *cluster, uint32_t time_us)
 
 	cluster->histtimer.function = clusttimer_fn;
 	hrtimer_start(&cluster->histtimer, clust_ktime,
-				HRTIMER_MODE_REL_PINNED);
+		      HRTIMER_MODE_REL_PINNED_HARD);
 }
 
 static void msm_pm_set_timer(uint32_t modified_time_us)
@@ -412,7 +413,7 @@ static void biastimer_start(uint32_t time_ns)
 	struct hrtimer *cpu_biastimer = &per_cpu(biastimer, cpu);
 
 	cpu_biastimer->function = biastimer_fn;
-	hrtimer_start(cpu_biastimer, bias_ktime, HRTIMER_MODE_REL_PINNED);
+	hrtimer_start(cpu_biastimer, bias_ktime, HRTIMER_MODE_REL_PINNED_HARD);
 }
 
 static uint64_t find_deviation(int *interval, uint32_t ref_stddev,
@@ -473,7 +474,7 @@ static uint64_t lpm_cpuidle_predict(struct cpuidle_device *dev,
 	struct lpm_history *history = &per_cpu(hist, dev->cpu);
 	struct ipi_history *ipi_history = &per_cpu(cpu_ipi_history, dev->cpu);
 
-	if (!lpm_prediction || !cpu->lpm_prediction)
+	if (!lpm_prediction_enabled && !cpu->lpm_prediction)
 		return 0;
 
 	/*
@@ -484,7 +485,7 @@ static uint64_t lpm_cpuidle_predict(struct cpuidle_device *dev,
 		history->hinvalid = 0;
 		history->htmr_wkup = 1;
 		history->stime = 0;
-		return 0;
+		return 1;
 	}
 
 	/*
@@ -548,7 +549,7 @@ static uint64_t lpm_cpuidle_predict(struct cpuidle_device *dev,
 		}
 	}
 
-	if (*idx_restrict_time || !cpu->ipi_prediction || !lpm_ipi_prediction)
+	if (*idx_restrict_time || !cpu->ipi_prediction || !lpm_ipi_prediction_enabled)
 		return 0;
 
 	avg = find_deviation(ipi_history->interval, cpu->ref_stddev
@@ -567,7 +568,7 @@ static inline void invalidate_predict_history(struct cpuidle_device *dev)
 	struct lpm_history *history = &per_cpu(hist, dev->cpu);
 	struct lpm_cpu *lpm_cpu = per_cpu(cpu_lpm, dev->cpu);
 
-	if (!lpm_prediction || !lpm_cpu->lpm_prediction)
+	if (!lpm_prediction_enabled && !lpm_cpu->lpm_prediction)
 		return;
 
 	if (history->hinvalid) {
@@ -584,7 +585,7 @@ static void clear_predict_history(void)
 	unsigned int cpu;
 	struct lpm_cpu *lpm_cpu = per_cpu(cpu_lpm, raw_smp_processor_id());
 
-	if (!lpm_prediction || !lpm_cpu->lpm_prediction)
+	if (!lpm_prediction_enabled && !lpm_cpu->lpm_prediction)
 		return;
 
 	for_each_possible_cpu(cpu) {
@@ -685,9 +686,10 @@ static int cpu_power_select(struct cpuidle_device *dev,
 			 * call prediction.
 			 */
 			if (next_wakeup_us > max_residency) {
-				predicted = lpm_cpuidle_predict(dev, cpu,
-					&idx_restrict, &idx_restrict_time,
-					&ipi_predicted);
+				predicted = (lpm_cpuidle_predict(dev, cpu,
+					&idx_restrict,
+					&idx_restrict_time, &ipi_predicted) == 1) ? 0 :
+						(max_residency >> 1);
 				if (predicted && (predicted < min_residency))
 					predicted = min_residency;
 			} else
@@ -724,7 +726,7 @@ static int cpu_power_select(struct cpuidle_device *dev,
 	if ((predicted || (idx_restrict != cpu->nlevels + 1)) &&
 	    (best_level < (cpu->nlevels-1))) {
 		htime = predicted + cpu->tmr_add;
-		if (lpm_ipi_prediction && cpu->ipi_prediction)
+		if (lpm_ipi_prediction_enabled && cpu->ipi_prediction)
 			htime += DEFAULT_IPI_TIMER_ADD;
 		if (!predicted)
 			htime = idx_restrict_time;
@@ -789,14 +791,14 @@ static uint64_t get_cluster_sleep_time(struct lpm_cluster *cluster,
 		if (*next_event_c < next_event)
 			next_event = *next_event_c;
 
-		if (from_idle && lpm_prediction && cluster->lpm_prediction) {
+		if (from_idle && lpm_prediction_enabled && cluster->lpm_prediction) {
 			history = &per_cpu(hist, cpu);
 			if (history->stime && (history->stime < prediction))
 				prediction = history->stime;
 		}
 	}
 
-	if (from_idle && lpm_prediction && cluster->lpm_prediction) {
+	if (from_idle && lpm_prediction_enabled && cluster->lpm_prediction) {
 		if (prediction > ktime_to_us(ktime_get()))
 			*pred_time = prediction - ktime_to_us(ktime_get());
 	}
@@ -815,7 +817,7 @@ static int cluster_predict(struct lpm_cluster *cluster,
 	struct cluster_history *history = &cluster->history;
 	int64_t cur_time = ktime_to_us(ktime_get());
 
-	if (!lpm_prediction || !cluster->lpm_prediction)
+	if (!lpm_prediction_enabled && !cluster->lpm_prediction)
 		return 0;
 
 	if (history->hinvalid) {
@@ -890,7 +892,7 @@ static void update_cluster_history(struct cluster_history *history, int idx)
 	struct lpm_cluster *cluster =
 			container_of(history, struct lpm_cluster, history);
 
-	if (!lpm_prediction || !cluster->lpm_prediction)
+	if (!lpm_prediction_enabled && !cluster->lpm_prediction)
 		return;
 
 	if ((history->entry_idx == -1) || (history->entry_idx == idx)) {
@@ -951,7 +953,7 @@ static void clear_cl_predict_history(void)
 	struct lpm_cluster *cluster = lpm_root_node;
 	struct list_head *list;
 
-	if (!lpm_prediction || !cluster->lpm_prediction)
+	if (!lpm_prediction_enabled && !cluster->lpm_prediction)
 		return;
 
 	clear_cl_history_each(&cluster->history);
@@ -1065,7 +1067,7 @@ static int cluster_configure(struct lpm_cluster *cluster, int idx,
 			cluster->child_cpus.bits[0], from_idle);
 		lpm_stats_cluster_enter(cluster->stats, idx);
 
-		if (from_idle && lpm_prediction && cluster->lpm_prediction)
+		if (from_idle && lpm_prediction_enabled && cluster->lpm_prediction)
 			update_cluster_history_time(&cluster->history, idx,
 						ktime_to_us(ktime_get()));
 	}
@@ -1369,7 +1371,7 @@ static void update_history(struct cpuidle_device *dev, int idx)
 	uint32_t tmr = 0;
 	struct lpm_cpu *lpm_cpu = per_cpu(cpu_lpm, dev->cpu);
 
-	if (!lpm_prediction || !lpm_cpu->lpm_prediction)
+	if (!lpm_prediction_enabled && !lpm_cpu->lpm_prediction)
 		return;
 
 	if (history->htmr_wkup) {
@@ -1429,9 +1431,8 @@ exit:
 	cpu_unprepare(cpu, idx, true);
 	dev->last_residency = ktime_us_delta(ktime_get(), start);
 	update_history(dev, idx);
-
-	trace_cpu_idle_exit(idx, ret);
-	if (lpm_prediction && cpu->lpm_prediction) {
+	trace_cpu_idle_exit(idx, success);
+	if (lpm_prediction_enabled && cpu->lpm_prediction) {
 		histtimer_cancel();
 		clusttimer_cancel();
 	}
@@ -1724,6 +1725,16 @@ static int lpm_suspend_enter(suspend_state_t state)
 		pr_err("Failed suspend\n");
 		return 0;
 	}
+
+	/*
+	 * Print the clocks and regulators which are enabled during
+	 * system suspend.  This debug information is useful to know
+	 * which resources are enabled and preventing the system level
+	 * LPMs (XO and Vmin).
+	 */
+	clock_debug_print_enabled();
+	regulator_debug_print_enabled();
+
 	cpu_prepare(lpm_cpu, idx, false);
 	cluster_prepare(cluster, cpumask, idx, false, 0);
 
@@ -1777,9 +1788,11 @@ static int lpm_probe(struct platform_device *pdev)
 	hrtimer_init(&lpm_hrtimer, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
 	for_each_possible_cpu(cpu) {
 		cpu_histtimer = &per_cpu(histtimer, cpu);
-		hrtimer_init(cpu_histtimer, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
+		hrtimer_init(cpu_histtimer, CLOCK_MONOTONIC,
+			     HRTIMER_MODE_REL_HARD);
 		cpu_histtimer = &per_cpu(biastimer, cpu);
-		hrtimer_init(cpu_histtimer, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
+		hrtimer_init(cpu_histtimer, CLOCK_MONOTONIC,
+			     HRTIMER_MODE_REL_HARD);
 	}
 
 	cluster_timer_init(lpm_root_node);
